@@ -252,7 +252,7 @@ app.get('/api/apple-download', async (req, res) => {
     const result = await downloader.download(url, calidad);
     if (!result.success) throw new Error(result.message);
 
-    res.json({ success: true, url: `http://localhost:3000/api/apple-file/${result.id}` });
+    res.json({ success: true, url: `/api/apple-file/${result.id}` });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
