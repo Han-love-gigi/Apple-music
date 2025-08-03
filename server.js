@@ -7,9 +7,12 @@ const crypto = require('crypto');
 const fetch = require('node-fetch');
 const ID3Writer = require('node-id3');
 const CryptoJS = require('crypto-js');
+const fs = require('fs');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
 
-const fileMap = {};
 const tempBufferMap = {}
+
 class AppleMusicDownloader {
   static convertirDuracion(duracion) {
     const match = duracion?.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
@@ -53,7 +56,7 @@ class AppleMusicDownloader {
       descripcion: json.description || audio.description,
       artista: artist.name || albumArtist.name || null,
       artista_url: artist.url || albumArtist.url || null,
-      album: albumTitle || null,
+      album: albumTitle || albumArtist,
       album_url: audio.inAlbum?.url || null,
       imagen: audio.image || json.image || null,
       fecha: audio.uploadDate || json.datePublished || null,
@@ -62,7 +65,7 @@ class AppleMusicDownloader {
     };
   }
 
-  async download(url) {
+  async download(url, quality = 128) {
     try {
       const info = await this.getInfo(url);
       const query = `${info.titulo} ${info.artista}`;
@@ -95,43 +98,109 @@ class AppleMusicDownloader {
       const result = await response.json();
       if (!result?.url) throw new Error('No se pudo obtener el enlace de descarga');
 
+      const imageRes = await axios.get(info.imagen, { responseType: 'arraybuffer' });
+      const imageBuffer = Buffer.from(imageRes.data);
+      if (quality === 256 || quality === 320) {
+        const bitrate = `${quality}k`;
+        const inputPath = path.join(__dirname, 'temp_input.mp3');
+        const outputPath = path.join(__dirname, `temp_output_${Date.now()}.mp3`);
+
+        const stream = await axios.get(result.url, { responseType: 'stream' });
+        const writer = fs.createWriteStream(inputPath);
+        await new Promise((resolve, reject) => {
+          stream.data.pipe(writer);
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
+
+        await new Promise((resolve, reject) => {
+          ffmpeg(inputPath)
+            .audioCodec('libmp3lame')
+            .audioBitrate(bitrate)
+            .audioChannels(2)
+            .audioFrequency(44100)
+            .outputOptions([
+              `-b:a ${bitrate}`,
+              '-ac 2',
+              '-ar 44100',
+              '-movflags +faststart',
+              '-compression_level 10'
+            ])
+            .audioFilters([
+              'loudnorm=I=-16:TP=-1.5:LRA=11',
+              'bass=g=6:f=110:w=0.3',
+              'treble=g=4:f=3000:w=0.5',
+              'acompressor=threshold=-12dB:ratio=2:attack=20:release=250',
+              'dynaudnorm=g=12',
+              'highpass=f=30',
+              'lowpass=f=18000'
+            ])
+            .save(outputPath)
+            .on('end', resolve)
+            .on('error', reject);
+        });
+
+        let buffer = fs.readFileSync(outputPath);
+        buffer = ID3Writer.update({
+          title: info.titulo,
+          artist: info.artista,
+          album: info.album,
+          APIC: {
+            mime: "image/jpeg",
+            type: { id: 3, name: "front cover" },
+            description: "Portada",
+            imageBuffer
+          },
+          comment: { language: 'eng', text: info.descripcion }
+        }, buffer);
+
+        fs.unlinkSync(inputPath);
+        fs.unlinkSync(outputPath);
+
+        const id = crypto.randomBytes(256).toString('hex');
+        tempBufferMap[id] = {
+          buffer,
+          fileName: `${info.titulo} - ${info.artista}.mp3`
+        };
+
+        return {
+          success: true,
+          id,
+          title: info.titulo,
+          artist: info.artista,
+          album: info.album,
+          fecha: info.fecha,
+          descripcion: info.descripcion,
+          imagen: info.imagen
+        };
+      }
+
+      // Calidad estándar (128kbps)
       const audioRes = await axios.get(result.url, { responseType: 'arraybuffer' });
       let buffer = Buffer.from(audioRes.data);
 
-      // Obtener carátula
-      const imageRes = await axios.get(info.imagen, { responseType: 'arraybuffer' });
-      const imageBuffer = Buffer.from(imageRes.data);
-
-      // Etiquetas
-      const tags = {
+      buffer = ID3Writer.update({
         title: info.titulo,
         artist: info.artista,
         album: info.album,
         APIC: {
           mime: "image/jpeg",
-          type: {
-            id: 3,
-            name: "front cover"
-          },
+          type: { id: 3, name: "front cover" },
           description: "Portada",
           imageBuffer
         },
-        comment: {
-          language: 'eng',
-          text: info.descripcion
-        }
-      };
+        comment: { language: 'eng', text: info.descripcion }
+      }, buffer);
 
-      buffer = ID3Writer.update(tags, buffer);
-      const uniqueId = crypto.randomBytes(256).toString('hex');
-      tempBufferMap[uniqueId] = {
+      const id = crypto.randomBytes(256).toString('hex');
+      tempBufferMap[id] = {
         buffer,
         fileName: `${info.titulo} - ${info.artista}.mp3`
       };
 
       return {
         success: true,
-        id: uniqueId,
+        id,
         title: info.titulo,
         artist: info.artista,
         album: info.album,
@@ -139,17 +208,14 @@ class AppleMusicDownloader {
         descripcion: info.descripcion,
         imagen: info.imagen
       };
+
     } catch (error) {
       return { success: false, message: error.message };
     }
   }
 }
 
-
-const downloader = new AppleMusicDownloader(); // ✅ instanciado
-
-// ─────────────────────────────────────────────────────────────
-// EXPRESS APP
+const downloader = new AppleMusicDownloader();
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -158,9 +224,7 @@ app.use(express.static('public'));
 // Obtener información
 app.get('/api/apple-info', async (req, res) => {
   const { url } = req.query;
-  if (!url) {
-    return res.status(400).json({ success: false, message: 'Falta el parámetro url' });
-  }
+  if (!url) return res.status(400).json({ success: false, message: 'Falta el parámetro url' });
 
   try {
     const result = await downloader.getInfo(url);
@@ -177,21 +241,24 @@ app.get('/api/apple-info', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
-// Descargar canción
+
+// Descargar canción con calidad
 app.get('/api/apple-download', async (req, res) => {
-  const { url } = req.query;
+  const { url, quality } = req.query;
   if (!url) return res.status(400).json({ success: false, message: 'Falta el parámetro url' });
 
   try {
-    const result = await downloader.download(url);
+    const calidad = parseInt(quality) || 128;
+    const result = await downloader.download(url, calidad);
     if (!result.success) throw new Error(result.message);
 
-    res.json({ success: true, url: `/api/apple-file/${result.id}` });
+    res.json({ success: true, url: `http://localhost:3000/api/apple-file/${result.id}` });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
+// Enviar archivo
 app.get('/api/apple-file/:id', (req, res) => {
   const id = req.params.id;
   const data = tempBufferMap[id];
@@ -200,18 +267,14 @@ app.get('/api/apple-file/:id', (req, res) => {
     'Content-Type': 'audio/mpeg',
     'Content-Disposition': `attachment; filename="${data.fileName}"`,
     'Content-Length': data.buffer.length
-  })
+  });
   res.send(data.buffer).on('finish', () => {
     delete tempBufferMap[id];
   });
 });
 
-
-
-// Puerto
+// Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
-
-
