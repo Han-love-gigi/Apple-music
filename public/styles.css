@@ -7,6 +7,7 @@
     --hero-gradient-end: #cc0000;
     --shadow-color: rgba(0, 0, 0, 0.1);
 }
+
 @keyframes pulse {
     0% {
         transform: scale(1);
@@ -22,6 +23,21 @@
     animation: pulse 0.3s ease-in-out;
 }
 
+.qualityBtn {
+    flex: 1 1 90px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background-color: #1db954;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+
+  .qualityBtn:hover {
+    background-color: #14833b;
+  }
 
 [data-theme="dark"] {
     --background: #1a1a1a;
