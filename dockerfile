@@ -19,7 +19,7 @@ RUN npm install
 COPY . .
 
 # Puerto que usa Railway
-EXPOSE 3000
+EXPOSE 8080
 
 # Comando para correr tu app
 CMD ["node", "server.js"]
