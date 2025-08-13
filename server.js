@@ -10,9 +10,37 @@ const CryptoJS = require('crypto-js');
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
-
 const tempBufferMap = {}
+async function ytmp3mobi(youtubeUrl, format = "mp3") {
+    const regYoutubeId = /https:\/\/(www\.youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/watch\?v=)([^&?]+)/;
+    const videoId = youtubeUrl.match(regYoutubeId)?.[2];
+    const availableFormat = ["mp3", "mp4"];
+    const formatIndex = availableFormat.findIndex(v => v === format.toLowerCase());
+    if (formatIndex === -1) throw Error(`${format} no es un formato válido. Usa: ${availableFormat.join(", ")}`);
 
+    const urlParam = {
+        v: videoId,
+        f: format,
+        _: Math.random()
+    };
+
+    const headers = { "Referer": "https://es.ytmp3.mobi/" };
+
+    const fetchJson = async (url, desc) => {
+        const res = await fetch(url, { headers });
+        if (!res.ok) throw Error(`Fallo al obtener ${desc} | ${res.status} ${res.statusText}`);
+        return await res.json();
+    };
+
+    const { convertURL } = await fetchJson("https://d.ymcdn.org/api/v1/init?p=y&23=1llum1n471&_=" + Math.random(), "convertURL");
+    const { progressURL, downloadURL } = await fetchJson(`${convertURL}&${new URLSearchParams(urlParam).toString()}`, "progressURL y downloadURL");
+
+    let error, progress, title;
+    while (progress !== 3) {
+        ({ error, progress, title } = await fetchJson(progressURL, "verificar progreso"));
+    }
+    return { title, downloadURL };
+}
 class AppleMusicDownloader {
   static convertirDuracion(duracion) {
     const match = duracion?.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
@@ -81,31 +109,16 @@ class AppleMusicDownloader {
           return Math.abs(durCurr - duracionObjetivo) < Math.abs(durPrev - duracionObjetivo) ? curr : prev;
         });
       }
-
-      const response = await fetch('https://ds1.ezsrv.net/api/convert', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          url: video.url,
-          quality: 128,
-          trim: false,
-          startT: 0,
-          endT: 0,
-          token: AppleMusicDownloader.generateToken()
-        })
-      });
-
-      const result = await response.json();
-      if (!result?.url) throw new Error('No se pudo obtener el enlace de descarga');
-
+      const { downloadURL } = await ytmp3mobi(video.url, "mp3");
       const imageRes = await axios.get(info.imagen, { responseType: 'arraybuffer' });
       const imageBuffer = Buffer.from(imageRes.data);
+
       if (quality === 256 || quality === 320) {
         const bitrate = `${quality}k`;
         const inputPath = path.join(__dirname, 'temp_input.mp3');
         const outputPath = path.join(__dirname, `temp_output_${Date.now()}.mp3`);
 
-        const stream = await axios.get(result.url, { responseType: 'stream' });
+        const stream = await axios.get(downloadURL, { responseType: 'stream' });
         const writer = fs.createWriteStream(inputPath);
         await new Promise((resolve, reject) => {
           stream.data.pipe(writer);
@@ -117,24 +130,6 @@ class AppleMusicDownloader {
           ffmpeg(inputPath)
             .audioCodec('libmp3lame')
             .audioBitrate(bitrate)
-            .audioChannels(2)
-            .audioFrequency(44100)
-            .outputOptions([
-              `-b:a ${bitrate}`,
-              '-ac 2',
-              '-ar 44100',
-              '-movflags +faststart',
-              '-compression_level 10'
-            ])
-            .audioFilters([
-              'loudnorm=I=-16:TP=-1.5:LRA=11',
-              'bass=g=6:f=110:w=0.3',
-              'treble=g=4:f=3000:w=0.5',
-              'acompressor=threshold=-12dB:ratio=2:attack=20:release=250',
-              'dynaudnorm=g=12',
-              'highpass=f=30',
-              'lowpass=f=18000'
-            ])
             .save(outputPath)
             .on('end', resolve)
             .on('error', reject);
@@ -163,20 +158,9 @@ class AppleMusicDownloader {
           fileName: `${info.titulo} - ${info.artista}.mp3`
         };
 
-        return {
-          success: true,
-          id,
-          title: info.titulo,
-          artist: info.artista,
-          album: info.album,
-          fecha: info.fecha,
-          descripcion: info.descripcion,
-          imagen: info.imagen
-        };
+        return { success: true, id, ...info };
       }
-
-      // Calidad estándar (128kbps)
-      const audioRes = await axios.get(result.url, { responseType: 'arraybuffer' });
+      const audioRes = await axios.get(downloadURL, { responseType: 'arraybuffer' });
       let buffer = Buffer.from(audioRes.data);
 
       buffer = ID3Writer.update({
@@ -198,16 +182,7 @@ class AppleMusicDownloader {
         fileName: `${info.titulo} - ${info.artista}.mp3`
       };
 
-      return {
-        success: true,
-        id,
-        title: info.titulo,
-        artist: info.artista,
-        album: info.album,
-        fecha: info.fecha,
-        descripcion: info.descripcion,
-        imagen: info.imagen
-      };
+      return { success: true, id, ...info };
 
     } catch (error) {
       return { success: false, message: error.message };
