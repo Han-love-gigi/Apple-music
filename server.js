@@ -6,73 +6,39 @@ const yts = require('yt-search');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const ID3Writer = require('node-id3');
-const CryptoJS = require('crypto-js');
 const fs = require('fs');
 const path = require('path');
 
 const tempBufferMap = {};
 
-const SUPPORTED_AUDIO_FORMATS = ['mp3', 'm4a', 'opus', 'webm'];
-const SUPPORTED_VIDEO_QUALITIES = ['144', '240', '360', '480', '720', '1080'];
+// --- Función FLVTO ---
+async function flvtoDownload(youtubeUrl, fileType = "mp3") {
+  const videoIdMatch = youtubeUrl.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
+  if (!videoIdMatch) throw new Error("URL de YouTube inválida");
+  const videoId = videoIdMatch[1];
 
-const ytdl = {
-  request: async (url, formatOrQuality) => {
-    try {
-      const encodedUrl = encodeURIComponent(url);
-      const isAudio = SUPPORTED_AUDIO_FORMATS.includes(formatOrQuality.toLowerCase());
-      const isVideo = SUPPORTED_VIDEO_QUALITIES.includes(formatOrQuality);
+  const response = await fetch("https://es.flvto.top/converter", {
+    method: "POST",
+    headers: {
+      "accept": "*/*",
+      "accept-language": "es-PE,es-419;q=0.9,es;q=0.8",
+      "content-type": "application/json",
+      "Referer": "https://flvto.pro/"
+    },
+    body: JSON.stringify({ id: videoId, fileType })
+  });
 
-      const type = isAudio ? 'audio' : 'video';
-      const formatParam = formatOrQuality;
+  const data = await response.json();
+  if (data.status !== "ok") throw new Error(data.msg || "Error desconocido");
 
-      const { data } = await axios.get(
-        `https://p.oceansaver.in/ajax/download.php?format=${formatParam}&url=${encodedUrl}`
-      );
-      return {
-        status: true,
-        taskId: data.id,
-        type,
-        quality: isAudio ? formatParam : `${formatParam}p`
-      };
-    } catch (error) {
-      return { status: false, message: error.message };
-    }
-  },
+  let sizeText;
+  let size = data.filesize;
+  if (size >= 1024 ** 3) sizeText = (size / 1024 ** 3).toFixed(2) + " GB";
+  else if (size >= 1024 ** 2) sizeText = (size / 1024 ** 2).toFixed(2) + " MB";
+  else sizeText = (size / 1024).toFixed(2) + " KB";
 
-  convert: async (taskId) => {
-    try {
-      const { data } = await axios.get(
-        `https://p.oceansaver.in/api/progress?id=${taskId}`
-      );
-      return data;
-    } catch (error) {
-      return null;
-    }
-  },
-
-  repeatRequest: async (taskId, type, quality) => {
-    for (let i = 0; i < 20; i++) {
-      const response = await ytdl.convert(taskId);
-      if (response && response.download_url) {
-        return {
-          status: true,
-          type,
-          quality,
-          url: response.download_url
-        };
-      }
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-    return { status: false, message: 'No se obtuvo URL de descarga' };
-  },
-
-  download: async (url, formatOrQuality) => {
-    const init = await ytdl.request(url, formatOrQuality);
-    if (!init.status) return init;
-
-    return await ytdl.repeatRequest(init.taskId, init.type, init.quality);
-  }
-};
+  return { title: data.title, size: sizeText, dl_url: data.link };
+}
 
 // --- Clase principal ---
 class AppleMusicDownloader {
@@ -90,12 +56,6 @@ class AppleMusicDownloader {
     if (partes.length === 2) return partes[0] * 60 + partes[1];
     if (partes.length === 3) return partes[0] * 3600 + partes[1] * 60 + partes[2];
     return 0;
-  }
-
-  static generateToken() {
-    const payload = JSON.stringify({ timestamp: Date.now() });
-    const key = 'dyhQjAtqAyTIf3PdsKcJ6nMX1suz8ksZ';
-    return CryptoJS.AES.encrypt(payload, key).toString();
   }
 
   async getInfo(url) {
@@ -124,60 +84,61 @@ class AppleMusicDownloader {
     };
   }
 
-  async download(url, quality = 128) { 
-  try {
-    const info = await this.getInfo(url);
-    const query = `${info.titulo} ${info.artista}`;
-    const { videos } = await yts.search({ query, hl: 'es', gl: 'ES' });
+  async download(url) {
+    try {
+      const info = await this.getInfo(url);
+      const query = `${info.titulo} ${info.artista}`;
+      const { videos } = await yts.search({ query, hl: 'es', gl: 'ES' });
 
-    let video = videos[0];
-    const duracionObjetivo = AppleMusicDownloader.duracionASegundos(info.duracion);
-    if (duracionObjetivo && videos.length > 0) {
-      video = videos.reduce((prev, curr) => {
-        const durPrev = AppleMusicDownloader.duracionASegundos(prev.timestamp);
-        const durCurr = AppleMusicDownloader.duracionASegundos(curr.timestamp);
-        return Math.abs(durCurr - duracionObjetivo) < Math.abs(durPrev - duracionObjetivo) ? curr : prev;
-      });
+      const duracionObjetivo = AppleMusicDownloader.duracionASegundos(info.duracion);
+      let video = videos[0];
+
+      if (duracionObjetivo && videos.length > 0) {
+        video = videos.reduce((prev, curr) => {
+          const durPrev = AppleMusicDownloader.duracionASegundos(prev.timestamp);
+          const durCurr = AppleMusicDownloader.duracionASegundos(curr.timestamp);
+          return Math.abs(durCurr - duracionObjetivo) < Math.abs(durPrev - duracionObjetivo) ? curr : prev;
+        });
+      }
+
+      // Descargar audio con FLVTO
+      const flvtoData = await flvtoDownload(video.url, 'mp3');
+      const audioRes = await axios.get(flvtoData.dl_url, { responseType: 'arraybuffer' });
+      const imageRes = await axios.get(info.imagen, { responseType: 'arraybuffer' });
+      const imageBuffer = Buffer.from(imageRes.data);
+
+      let buffer = Buffer.from(audioRes.data);
+
+      // Aplicar ID3 Tags
+      buffer = ID3Writer.update({
+        title: info.titulo,
+        artist: info.artista,
+        album: info.album,
+        date: info.fecha,
+        APIC: {
+          mime: "image/jpeg",
+          type: { id: 3, name: "front cover" },
+          description: "Portada",
+          imageBuffer
+        },
+        comment: { language: 'eng', text: info.descripcion },
+        genre: "Music"
+      }, buffer);
+
+      const id = crypto.randomBytes(16).toString('hex');
+      tempBufferMap[id] = {
+        buffer,
+        fileName: `${info.titulo} - ${info.artista}.mp3`,
+        size: flvtoData.size,
+        dl_url: flvtoData.dl_url
+      };
+
+      return { success: true, id, ...info };
+    } catch (error) {
+      return { success: false, message: error.message };
     }
-
-    // Siempre descargamos en mp3
-    const { url: downloadURL } = await ytdl.download(video.url, 'mp3');
-    const audioRes = await axios.get(downloadURL, { responseType: 'arraybuffer' });
-    const imageRes = await axios.get(info.imagen, { responseType: 'arraybuffer' });
-
-    let buffer = Buffer.from(audioRes.data);
-    const imageBuffer = Buffer.from(imageRes.data);
-
-    // ID3 Tags
-    buffer = ID3Writer.update({
-      title: info.titulo,
-      artist: info.artista,
-      album: info.album,
-      date: info.fecha,
-      APIC: {
-        mime: "image/jpeg",
-        type: { id: 3, name: "front cover" },
-        description: "Portada",
-        imageBuffer
-      },
-      comment: { language: 'eng', text: info.descripcion },
-      genre: "Music"
-    }, buffer);
-
-    const id = crypto.randomBytes(16).toString('hex');
-    tempBufferMap[id] = {
-      buffer,
-      fileName: `${info.titulo} - ${info.artista}.mp3`
-    };
-
-    return { success: true, id, ...info };
-
-  } catch (error) {
-    return { success: false, message: error.message };
   }
 }
-}
-
 
 const downloader = new AppleMusicDownloader();
 const app = express();
